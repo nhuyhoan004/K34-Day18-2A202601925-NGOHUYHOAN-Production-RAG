@@ -30,7 +30,26 @@ def load_test_set(path: str = TEST_SET_PATH) -> list[dict]:
 def evaluate_ragas(questions: list[str], answers: list[str],
                    contexts: list[list[str]], ground_truths: list[str]) -> dict:
     """Run RAGAS evaluation."""
-    # TODO: Implement RAGAS evaluation
+    try:
+        from datasets import Dataset
+        from ragas import evaluate
+        from ragas.metrics import faithfulness, answer_relevancy, context_precision, context_recall
+        dataset = Dataset.from_dict({"question": questions, "answer": answers,
+                                     "contexts": contexts, "ground_truth": ground_truths})
+        frame = evaluate(dataset, metrics=[faithfulness, answer_relevancy,
+                                           context_precision, context_recall]).to_pandas()
+        per_question = [EvalResult(
+            question=row["question"], answer=row["answer"], contexts=row["contexts"],
+            ground_truth=row["ground_truth"], faithfulness=float(row.get("faithfulness", 0.0)),
+            answer_relevancy=float(row.get("answer_relevancy", 0.0)),
+            context_precision=float(row.get("context_precision", 0.0)),
+            context_recall=float(row.get("context_recall", 0.0)),
+        ) for _, row in frame.iterrows()]
+        metrics = ("faithfulness", "answer_relevancy", "context_precision", "context_recall")
+        return {metric: sum(getattr(row, metric) for row in per_question) / max(len(per_question), 1)
+                for metric in metrics} | {"per_question": per_question}
+    except Exception as error:
+        print(f"  RAGAS evaluation unavailable: {error}")
     # 1. Wrap trong try/except — RAGAS cần OPENAI_API_KEY và Python 3.11+.
     # try:
     #     from ragas import evaluate
@@ -62,7 +81,22 @@ def evaluate_ragas(questions: list[str], answers: list[str],
 
 def failure_analysis(eval_results: list[EvalResult], bottom_n: int = 10) -> list[dict]:
     """Analyze bottom-N worst questions using Diagnostic Tree."""
-    # TODO: Implement failure analysis
+    diagnostic_tree = {
+        "faithfulness": ("LLM hallucinating", "Tighten prompt, lower temperature"),
+        "context_recall": ("Missing relevant chunks", "Improve chunking or add BM25"),
+        "context_precision": ("Too many irrelevant chunks", "Add reranking or metadata filter"),
+        "answer_relevancy": ("Answer does not match question", "Improve prompt template"),
+    }
+    metrics = tuple(diagnostic_tree)
+    ranked = []
+    for result in eval_results:
+        values = {metric: getattr(result, metric) for metric in metrics}
+        worst_metric = min(values, key=values.get)
+        diagnosis, suggested_fix = diagnostic_tree[worst_metric]
+        ranked.append({"question": result.question, "worst_metric": worst_metric,
+                       "score": sum(values.values()) / len(values), "diagnosis": diagnosis,
+                       "suggested_fix": suggested_fix})
+    return sorted(ranked, key=lambda item: item["score"])[:bottom_n]
     # 1. diagnostic_tree = {
     #        "faithfulness": ("LLM hallucinating", "Tighten prompt, lower temperature"),
     #        "context_recall": ("Missing relevant chunks", "Improve chunking or add BM25"),
@@ -73,7 +107,6 @@ def failure_analysis(eval_results: list[EvalResult], bottom_n: int = 10) -> list
     # 3. Sort by avg ascending → take bottom_n
     # 4. Return [{"question": ..., "worst_metric": ..., "score": ...,
     #             "diagnosis": ..., "suggested_fix": ...}]
-    return []
 
 
 def save_report(results: dict, failures: list[dict], path: str = "ragas_report.json"):

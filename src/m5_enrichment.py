@@ -8,7 +8,7 @@ Làm giàu chunks TRƯỚC khi embed: Summarize, HyQA, Contextual Prepend, Auto 
 Test: pytest tests/test_m5.py
 """
 
-import os, sys
+import os, sys, re
 from dataclasses import dataclass, field
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
@@ -34,7 +34,17 @@ def summarize_chunk(text: str) -> str:
     Tạo summary ngắn cho chunk.
     Embed summary thay vì (hoặc cùng với) raw chunk → giảm noise.
     """
-    # TODO: Implement chunk summarization
+    if OPENAI_API_KEY:
+        try:
+            from openai import OpenAI
+            response = OpenAI().chat.completions.create(
+                model="gpt-4o-mini", max_tokens=150,
+                messages=[{"role": "system", "content": "Tóm tắt văn bản bằng tiếng Việt trong 2 câu ngắn."},
+                          {"role": "user", "content": text}],
+            )
+            return response.choices[0].message.content.strip()
+        except Exception:
+            pass
     # if OPENAI_API_KEY:
     #     try:
     #         from openai import OpenAI
@@ -54,7 +64,8 @@ def summarize_chunk(text: str) -> str:
     # Extractive fallback (không cần API):
     # sentences = [s.strip() for s in text.replace("\n", " ").split(". ") if s.strip()]
     # return ". ".join(sentences[:2]) + "." if sentences else text
-    return text
+    sentences = [sentence.strip() for sentence in re.split(r"(?<=[.!?])\s+", text.replace("\n", " ")) if sentence.strip()]
+    return " ".join(sentences[:2]) or text
 
 
 # ─── Technique 2: Hypothesis Question-Answer (HyQA) ─────
@@ -65,7 +76,18 @@ def generate_hypothesis_questions(text: str, n_questions: int = 3) -> list[str]:
     Generate câu hỏi mà chunk có thể trả lời.
     Index cả questions lẫn chunk → query match tốt hơn (bridge vocabulary gap).
     """
-    # TODO: Implement HyQA generation
+    if OPENAI_API_KEY:
+        try:
+            from openai import OpenAI
+            response = OpenAI().chat.completions.create(
+                model="gpt-4o-mini", max_tokens=200,
+                messages=[{"role": "system", "content": f"Tạo {n_questions} câu hỏi tiếng Việt có thể trả lời từ văn bản; mỗi câu một dòng."},
+                          {"role": "user", "content": text}],
+            )
+            questions = response.choices[0].message.content.splitlines()
+            return [re.sub(r"^\s*[\d.)-]+\s*", "", question).strip() for question in questions if question.strip()][:n_questions]
+        except Exception:
+            pass
     # if OPENAI_API_KEY:
     #     try:
     #         from openai import OpenAI
@@ -87,7 +109,8 @@ def generate_hypothesis_questions(text: str, n_questions: int = 3) -> list[str]:
     # import re
     # sentences = [s.strip() for s in re.split(r'[.!?\n]', text) if len(s.strip()) > 10]
     # return [f"{s.rstrip('.')}?" for s in sentences[:n_questions]]
-    return []
+    sentences = [sentence.strip().rstrip(".?!") for sentence in re.split(r"[.!?\n]+", text) if len(sentence.strip()) > 10]
+    return [f"Thông tin nào về: {sentence}?" for sentence in sentences[:n_questions]]
 
 
 # ─── Technique 3: Contextual Prepend (Anthropic style) ──
@@ -98,7 +121,17 @@ def contextual_prepend(text: str, document_title: str = "") -> str:
     Prepend context giải thích chunk nằm ở đâu trong document.
     Anthropic benchmark: giảm 49% retrieval failure (alone).
     """
-    # TODO: Implement contextual prepend
+    if OPENAI_API_KEY:
+        try:
+            from openai import OpenAI
+            response = OpenAI().chat.completions.create(
+                model="gpt-4o-mini", max_tokens=80,
+                messages=[{"role": "system", "content": "Viết một câu ngắn nêu ngữ cảnh của đoạn văn."},
+                          {"role": "user", "content": f"Tài liệu: {document_title}\n\n{text}"}],
+            )
+            return f"{response.choices[0].message.content.strip()}\n\n{text}"
+        except Exception:
+            pass
     # if OPENAI_API_KEY:
     #     try:
     #         from openai import OpenAI
@@ -119,7 +152,8 @@ def contextual_prepend(text: str, document_title: str = "") -> str:
     # Simple fallback:
     # prefix = f"Trích từ {document_title}. " if document_title else ""
     # return f"{prefix}{text}"
-    return text
+    prefix = f"Trích từ {document_title}." if document_title else "Ngữ cảnh tài liệu."
+    return f"{prefix}\n\n{text}"
 
 
 # ─── Technique 4: Auto Metadata Extraction ──────────────
@@ -129,7 +163,12 @@ def extract_metadata(text: str) -> dict:
     """
     LLM extract metadata tự động: topic, entities, date_range, category.
     """
-    # TODO: Implement auto metadata extraction
+    words = re.findall(r"[A-Za-zÀ-ỹ0-9]+", text)
+    language = "vi" if re.search(r"[À-ỹ]", text) else "en"
+    categories = {"hr": ("nhân viên", "nghỉ phép", "lương"), "it": ("mật khẩu", "vpn", "hệ thống"),
+                  "finance": ("chi phí", "thanh toán", "ngân sách")}
+    category = next((name for name, terms in categories.items() if any(term in text.lower() for term in terms)), "policy")
+    return {"topic": " ".join(words[:8]) or "general", "entities": [], "category": category, "language": language}
     # if OPENAI_API_KEY:
     #     try:
     #         import json as _json
@@ -159,7 +198,11 @@ def _enrich_single_call(text: str, source: str) -> dict:
 
     ⚠️ Cost optimization: 1 API call thay vì 4 calls riêng lẻ.
     """
-    # TODO: Implement combined enrichment (1 call/chunk)
+    summary = summarize_chunk(text)
+    questions = generate_hypothesis_questions(text)
+    contextual = contextual_prepend(text, source)
+    context = contextual[:-len(text)].strip() if contextual.endswith(text) else ""
+    return {"summary": summary, "questions": questions, "context": context, "metadata": extract_metadata(text)}
     # if OPENAI_API_KEY:
     #     try:
     #         import json as _json
@@ -182,7 +225,6 @@ def _enrich_single_call(text: str, source: str) -> dict:
     #         return _json.loads(resp.choices[0].message.content)
     #     except Exception as e:
     #         print(f"  ⚠️  Enrichment API failed: {e}")
-    return {}
 
 
 # ─── Full Enrichment Pipeline ────────────────────────────
