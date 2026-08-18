@@ -7,6 +7,7 @@ Chạy: python check_lab.py
 
 import json
 import os
+import re
 import sys
 import subprocess
 
@@ -58,17 +59,16 @@ def run_tests() -> tuple[int, int]:
             [sys.executable, "-m", "pytest", "tests/", "-v", "--tb=no", "-q"],
             capture_output=True, text=True, timeout=120,
         )
-        lines = result.stdout.strip().split("\n")
-        summary = lines[-1] if lines else ""
-        # Parse "X passed, Y failed" or "X passed"
-        passed = total = 0
-        for part in summary.split(","):
-            part = part.strip()
-            if "passed" in part:
-                passed = int(part.split()[0])
-                total += passed
-            if "failed" in part:
-                total += int(part.split()[0])
+        # Pytest can print separator lines after its summary.  Find the
+        # summary line instead of assuming the final line contains counts.
+        summary = next(
+            (line for line in reversed(result.stdout.splitlines())
+             if re.search(r"\b\d+\s+(?:passed|failed|error|errors)\b", line)),
+            "",
+        )
+        counts = re.findall(r"(\d+)\s+(passed|failed|error|errors)", summary)
+        passed = sum(int(count) for count, status in counts if status == "passed")
+        total = sum(int(count) for count, _ in counts)
         return passed, total
     except Exception as e:
         print(f"  ⚠️  pytest error: {e}")
